@@ -10,18 +10,31 @@ import time
 from typing import Optional
 
 import requests
+import streamlit as st
 from dotenv import load_dotenv
 from supabase import create_client, Client
 
 # 加载 .env 中的环境变量
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+
+def _get_secret(key: str, default=None) -> Optional[str]:
+    """优先从 st.secrets 读取密钥，失败则回退到 os.getenv()。
+
+    这样本地开发（.env）和 Streamlit Cloud（st.secrets）均可正常工作。
+    """
+    try:
+        return st.secrets[key]
+    except Exception:
+        return os.getenv(key, default)
+
+
+DEEPSEEK_API_KEY = _get_secret("DEEPSEEK_API_KEY")
 DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
 
 # ── Supabase 客户端（全局单例） ──
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+SUPABASE_URL = _get_secret("SUPABASE_URL")
+SUPABASE_KEY = _get_secret("SUPABASE_KEY")
 
 _supabase: Optional[Client] = None
 
