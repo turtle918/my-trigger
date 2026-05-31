@@ -7,7 +7,7 @@
 import json
 import os
 import time
-from typing import Optional
+from typing import Optional, Any
 
 import requests
 import streamlit as st
@@ -137,14 +137,16 @@ def save_data(data: list[dict]) -> None:
 #  DeepSeek API —— 根据关键词生成变式题
 # ============================================================
 
-def generate_question(keyword: str) -> Optional[dict]:
+def generate_question(keyword: str) -> dict[str, Any]:
     """调用 DeepSeek API 根据 keyword 生成一道变式题和标准解析。
 
-    返回 {"question": str, "solution": str}，失败返回 None。
+    成功时返回 {"question": str, "solution": str}。
+    失败时返回 {"error": str, "detail": str, ...}，方便调用方展示具体原因。
     """
     if not DEEPSEEK_API_KEY:
-        print("\n  错误: 未找到 DEEPSEEK_API_KEY，请检查 .env 文件。")
-        return None
+        msg = "未找到 DEEPSEEK_API_KEY，请检查 .env 或 st.secrets 配置。"
+        print(f"\n  错误: {msg}")
+        return {"error": msg, "detail": "DEEPSEEK_API_KEY 为空"}
 
     headers = {
         "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
@@ -178,7 +180,20 @@ def generate_question(keyword: str) -> Optional[dict]:
     try:
         print("\n  ⏳ 正在调用 DeepSeek API 生成题目...")
         resp = requests.post(DEEPSEEK_URL, headers=headers, json=payload, timeout=120)
-        resp.raise_for_status()
+
+        # 非 200 状态码：收集完整错误信息再返回，不直接 raise
+        if not resp.ok:
+            status_code = resp.status_code
+            try:
+                error_body = resp.json()
+            except Exception:
+                error_body = resp.text
+            return {
+                "error": f"DeepSeek API 返回 HTTP {status_code}",
+                "status_code": status_code,
+                "detail": json.dumps(error_body, ensure_ascii=False) if isinstance(error_body, dict) else str(error_body),
+            }
+
         body = resp.json()
         content = body["choices"][0]["message"]["content"].strip()
 
@@ -202,9 +217,15 @@ def generate_question(keyword: str) -> Optional[dict]:
             "question": result.get("question", ""),
             "solution": result.get("solution", ""),
         }
-    except (requests.RequestException, json.JSONDecodeError, KeyError, IndexError) as e:
-        print(f"\n  API 调用失败: {e}")
-        return None
+
+    except requests.RequestException as e:
+        msg = f"网络请求异常: {e}"
+        print(f"\n  {msg}")
+        return {"error": msg, "detail": str(e)}
+    except (json.JSONDecodeError, KeyError, IndexError) as e:
+        msg = f"API 返回内容解析失败: {e}"
+        print(f"\n  {msg}")
+        return {"error": msg, "detail": str(e)}
 
 
 # ============================================================

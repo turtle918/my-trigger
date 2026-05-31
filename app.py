@@ -203,8 +203,15 @@ def render_test():
     if st.session_state.current_question is None:
         with st.spinner("🤖 正在调用 DeepSeek API 生成变式题..."):
             result = generate_question(keyword)
-            if result is None:
-                st.error("❌ 生成题目失败，请检查 API Key 或网络连接。")
+            if "error" in result:
+                # 显示详细错误信息，方便排查
+                st.error(f"❌ 生成题目失败 —— {result['error']}")
+                # 如果有 HTTP 状态码，单独高亮
+                if "status_code" in result:
+                    st.warning(f"HTTP 状态码: {result['status_code']}")
+                # 展示 API 返回的原始错误详情
+                with st.expander("🔍 查看错误详情"):
+                    st.code(result.get("detail", "无额外信息"), language="json")
                 if st.button("⏭️ 跳过此题"):
                     advance_to_next()
                     st.rerun()
