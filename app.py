@@ -1,0 +1,408 @@
+"""解题条件反射训练器 —— Streamlit 网页界面。
+
+使用 streamlit run app.py 启动，支持手机浏览器通过局域网 IP 访问。
+"""
+
+import streamlit as st
+from logic import (
+    load_data,
+    save_data,
+    generate_question,
+    sm2_update,
+    extract_subject,
+    get_subjects,
+    count_due,
+)
+
+
+# ============================================================
+#  页面配置
+# ============================================================
+
+st.set_page_config(
+    page_title="条件反射训练器",
+    page_icon="🧠",
+    layout="wide",
+)
+
+
+# ============================================================
+#  初始化 session_state
+# ============================================================
+
+def init_session():
+    """初始化 session_state 中的变量。"""
+    defaults = {
+        "test_active": False,
+        "current_entry": None,
+        "current_question": None,
+        "current_solution": None,
+        "show_solution": False,
+        "due_entries": [],
+        "due_index": 0,
+        "test_correct": 0,
+        "test_incorrect": 0,
+        "test_count": 0,
+        "selected_subject": None,
+        "answer_submitted": False,
+        "filter_subject": "全部科目",
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+
+init_session()
+
+
+# ============================================================
+#  侧边栏
+# ============================================================
+
+def render_sidebar():
+    """渲染侧边栏：统计信息。"""
+    with st.sidebar:
+        st.title("📊 统计")
+
+        data = load_data()
+        total = len(data)
+        due = count_due(data)
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("题库总数", total)
+        with col2:
+            st.metric("待复习", due)
+
+        st.divider()
+
+        # 科目筛选
+        subjects = get_subjects(data)
+        subject_options = ["全部科目"] + subjects
+        selected = st.selectbox(
+            "科目筛选",
+            subject_options,
+            index=subject_options.index(st.session_state.filter_subject)
+            if st.session_state.filter_subject in subject_options
+            else 0,
+        )
+        if selected != st.session_state.filter_subject:
+            st.session_state.filter_subject = selected
+            st.rerun()
+
+        st.divider()
+
+        # 操作按钮
+        st.subheader("⚙️ 操作")
+        if st.button("🔄 刷新数据", use_container_width=True):
+            st.rerun()
+
+        if st.button("🛑 结束当前测试", use_container_width=True):
+            st.session_state.test_active = False
+            st.session_state.current_entry = None
+            st.session_state.current_question = None
+            st.session_state.current_solution = None
+            st.session_state.show_solution = False
+            st.session_state.answer_submitted = False
+            st.rerun()
+
+
+# ============================================================
+#  主界面 —— 空闲状态
+# ============================================================
+
+def render_idle():
+    """显示空闲状态：可以开始新测试。"""
+    st.title("🧠 解题条件反射训练器")
+    st.caption("SM-2 艾宾浩斯记忆算法 + DeepSeek API 动态出题")
+
+    data = load_data()
+    due = count_due(data)
+
+    if not data:
+        st.info("📭 题库为空。请先通过命令行 `python trigger.py` 录入题目。")
+        return
+
+    if due == 0:
+        st.success("🎉 当前没有待复习的题目，均已掌握！")
+        total = len(data)
+        st.write(f"题库共 {total} 题。")
+        return
+
+    # 筛选到期题目
+    import time
+    now = int(time.time())
+
+    filter_subj = st.session_state.filter_subject
+    due_entries = [e for e in data if e.get("next_review", now) <= now]
+    if filter_subj != "全部科目":
+        due_entries = [e for e in due_entries if extract_subject(e["keyword"]) == filter_subj]
+
+    if not due_entries:
+        st.success(f"🎉 科目「{filter_subj}」下没有待复习的题目！")
+        return
+
+    st.write(f"当前待复习 **{len(due_entries)}** 题（共 {len(data)} 题）")
+
+    if st.button("▶️ 开始测试", type="primary", use_container_width=True):
+        st.session_state.test_active = True
+        st.session_state.due_entries = due_entries
+        st.session_state.due_index = 0
+        st.session_state.test_correct = 0
+        st.session_state.test_incorrect = 0
+        st.session_state.test_count = 0
+        st.session_state.current_entry = due_entries[0]
+        st.session_state.current_question = None
+        st.session_state.current_solution = None
+        st.session_state.show_solution = False
+        st.session_state.answer_submitted = False
+        st.rerun()
+
+
+# ============================================================
+#  主界面 —— 测试状态
+# ============================================================
+
+def render_test():
+    """显示测试状态：题目 → 思考 → 解析 → 判断。"""
+    st.title("🧠 条件反射测试")
+
+    # 进度条
+    total = len(st.session_state.due_entries)
+    current_idx = st.session_state.due_index
+    progress = (current_idx) / total if total > 0 else 1.0
+    st.progress(progress, text=f"进度: {current_idx}/{total}")
+
+    # 统计行
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("正确", st.session_state.test_correct)
+    with col2:
+        st.metric("错误", st.session_state.test_incorrect)
+    with col3:
+        accuracy = (
+            st.session_state.test_correct / st.session_state.test_count * 100
+            if st.session_state.test_count > 0
+            else 0
+        )
+        st.metric("正确率", f"{accuracy:.1f}%")
+
+    st.divider()
+
+    entry = st.session_state.current_entry
+    if entry is None:
+        st.error("没有更多题目了。")
+        return
+
+    # 显示知识点
+    keyword = entry["keyword"]
+    st.subheader("📌 知识点")
+    st.info(keyword)
+
+    # 生成题目按钮（如果还没生成）
+    if st.session_state.current_question is None:
+        with st.spinner("🤖 正在调用 DeepSeek API 生成变式题..."):
+            result = generate_question(keyword)
+            if result is None:
+                st.error("❌ 生成题目失败，请检查 API Key 或网络连接。")
+                if st.button("⏭️ 跳过此题"):
+                    advance_to_next()
+                    st.rerun()
+                return
+            st.session_state.current_question = result["question"]
+            st.session_state.current_solution = result["solution"]
+        st.rerun()
+
+    # 显示变式题
+    st.subheader("📝 变式题")
+    st.markdown(
+        f"""<div style="
+            background-color:#2d2d2d;
+            color:#ffffff;
+            font-weight:bold;
+            padding:20px;
+            border-radius:8px;
+            font-size:17px;
+            line-height:2.0;
+            border-left:4px solid #ff6b6b;
+        ">
+        {st.session_state.current_question.replace(chr(10), '<br>')}
+        </div>""",
+        unsafe_allow_html=True,
+    )
+
+    st.write("")
+    st.caption("💡 在心中思考答案，然后点击下方按钮查看标准解析。")
+
+    # 显示解析按钮
+    if not st.session_state.show_solution:
+        if st.button("🔍 查看标准解析", type="primary", use_container_width=True):
+            st.session_state.show_solution = True
+            st.rerun()
+
+    # 显示解析和判断按钮
+    if st.session_state.show_solution:
+        st.divider()
+        st.subheader("📖 标准解析")
+        st.markdown(
+            f"""<div style="
+                background-color:#1a3320;
+                color:#d4ffd4;
+                font-weight:bold;
+                padding:20px;
+                border-radius:8px;
+                font-size:17px;
+                line-height:2.0;
+                border-left:4px solid #4caf50;
+            ">
+            {st.session_state.current_solution.replace(chr(10), '<br>')}
+            </div>""",
+            unsafe_allow_html=True,
+        )
+
+        st.divider()
+
+        if not st.session_state.answer_submitted:
+            st.subheader("✅ 判断结果")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                if st.button("👍 我做对了", type="primary", use_container_width=True):
+                    submit_answer(True)
+            with col2:
+                if st.button("👎 我做错了", type="secondary", use_container_width=True):
+                    submit_answer(False)
+            with col3:
+                if st.button("⏭️ 跳过", use_container_width=True):
+                    advance_to_next()
+                    st.rerun()
+        else:
+            st.success("✅ 已记录！" if st.session_state.get("_last_correct", True) else "📝 已记录，继续加油！")
+            if st.button("▶️ 下一题", type="primary", use_container_width=True):
+                advance_to_next()
+                st.rerun()
+
+
+# ============================================================
+#  辅助函数
+# ============================================================
+
+def submit_answer(correct: bool):
+    """提交答案并更新 SM-2 数据。"""
+    entry = st.session_state.current_entry
+    if entry:
+        sm2_update(entry, correct)
+        data = load_data()
+        for i, e in enumerate(data):
+            if e["keyword"] == entry["keyword"]:
+                data[i] = entry
+                break
+        save_data(data)
+
+        st.session_state.test_count += 1
+        if correct:
+            st.session_state.test_correct += 1
+        else:
+            st.session_state.test_incorrect += 1
+
+        st.session_state.answer_submitted = True
+        st.session_state._last_correct = correct
+        st.rerun()
+
+
+def advance_to_next():
+    """前进到下一道题，或结束测试。"""
+    st.session_state.due_index += 1
+
+    if st.session_state.due_index >= len(st.session_state.due_entries):
+        # 测试结束
+        st.session_state.test_active = False
+        st.session_state.current_entry = None
+        st.session_state.current_question = None
+        st.session_state.current_solution = None
+        st.session_state.show_solution = False
+        st.session_state.answer_submitted = False
+        return
+
+    st.session_state.current_entry = st.session_state.due_entries[st.session_state.due_index]
+    st.session_state.current_question = None
+    st.session_state.current_solution = None
+    st.session_state.show_solution = False
+    st.session_state.answer_submitted = False
+
+
+# ============================================================
+#  测试完成界面
+# ============================================================
+
+def render_complete():
+    """显示测试完成总结。"""
+    st.title("🎉 本轮测试完成！")
+
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("共测试", st.session_state.test_count)
+    with col2:
+        st.metric("正确", st.session_state.test_correct)
+    with col3:
+        st.metric("错误", st.session_state.test_incorrect)
+    with col4:
+        accuracy = (
+            st.session_state.test_correct / st.session_state.test_count * 100
+            if st.session_state.test_count > 0
+            else 0
+        )
+        st.metric("正确率", f"{accuracy:.1f}%")
+
+    # 数据已实时保存，无需额外操作
+    st.success("✅ 所有复习进度已自动保存。")
+
+    st.divider()
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("🔄 开始新一轮测试", type="primary", use_container_width=True):
+            st.session_state.test_active = False
+            st.session_state.due_entries = []
+            st.session_state.due_index = 0
+            st.session_state.test_correct = 0
+            st.session_state.test_incorrect = 0
+            st.session_state.test_count = 0
+            st.session_state.current_entry = None
+            st.session_state.current_question = None
+            st.session_state.current_solution = None
+            st.session_state.show_solution = False
+            st.session_state.answer_submitted = False
+            st.rerun()
+    with col2:
+        if st.button("🏠 返回主页", use_container_width=True):
+            st.session_state.test_active = False
+            st.session_state.due_entries = []
+            st.session_state.due_index = 0
+            st.session_state.test_correct = 0
+            st.session_state.test_incorrect = 0
+            st.session_state.test_count = 0
+            st.session_state.current_entry = None
+            st.session_state.current_question = None
+            st.session_state.current_solution = None
+            st.session_state.show_solution = False
+            st.session_state.answer_submitted = False
+            st.rerun()
+
+
+# ============================================================
+#  主入口
+# ============================================================
+
+def main():
+    render_sidebar()
+
+    if not st.session_state.test_active:
+        render_idle()
+    elif st.session_state.current_entry is None:
+        render_complete()
+    else:
+        render_test()
+
+
+if __name__ == "__main__":
+    main()
