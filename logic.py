@@ -257,6 +257,24 @@ def get_subjects(data: list[dict]) -> list[str]:
 
 
 # ============================================================
+#  错题筛选 —— 用于穿插复习
+# ============================================================
+
+def get_weak_cards(data: list[dict], exclude_keyword: str = "", limit: int = 5) -> list[dict]:
+    """返回 ef 最低的到期题目列表，供错题穿插使用。
+
+    按 ef 升序排列（越低的越弱），只返回 next_review 已到期的卡片。
+    exclude_keyword 用于排除当前正在做的题目，避免立即重复。
+    """
+    now = int(time.time())
+    due = [e for e in data if e.get("next_review", now) <= now]
+    if exclude_keyword:
+        due = [e for e in due if e["keyword"] != exclude_keyword]
+    due.sort(key=lambda e: e.get("ef", 2.5))
+    return due[:limit]
+
+
+# ============================================================
 #  统计辅助函数
 # ============================================================
 

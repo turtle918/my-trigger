@@ -3,6 +3,11 @@
 使用 streamlit run app.py 启动，支持手机浏览器通过局域网 IP 访问。
 """
 
+import random
+import time
+from datetime import datetime
+
+import pandas as pd
 import streamlit as st
 from logic import (
     load_data,
@@ -12,6 +17,7 @@ from logic import (
     extract_subject,
     get_subjects,
     count_due,
+    get_weak_cards,
 )
 
 
@@ -46,6 +52,12 @@ def init_session():
         "selected_subject": None,
         "answer_submitted": False,
         "filter_subject": "全部科目",
+        # 错题穿插
+        "question_counter": 0,
+        "INTERLEAVE_INTERVAL": 5,
+        "_interleaved": False,
+        # 历史视图
+        "history_filter": "all",
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -130,7 +142,6 @@ def render_idle():
         return
 
     # 筛选到期题目
-    import time
     now = int(time.time())
 
     filter_subj = st.session_state.filter_subject
@@ -156,6 +167,8 @@ def render_idle():
         st.session_state.current_solution = None
         st.session_state.show_solution = False
         st.session_state.answer_submitted = False
+        st.session_state.question_counter = 0
+        st.session_state._interleaved = False
         st.rerun()
 
 
@@ -198,6 +211,10 @@ def render_test():
     keyword = entry["keyword"]
     st.subheader("📌 知识点")
     st.info(keyword)
+
+    # 错题穿插提示
+    if st.session_state.get("_interleaved", False):
+        st.warning("⚠️ 错题穿插复习 —— 这道题是你的弱项，请多加注意！")
 
     # 生成题目按钮（如果还没生成）
     if st.session_state.current_question is None:
@@ -324,8 +341,9 @@ def submit_answer(correct: bool):
 
 
 def advance_to_next():
-    """前进到下一道题，或结束测试。"""
+    """前进到下一道题，并在每 N 题后强制穿插一道错题。"""
     st.session_state.due_index += 1
+    st.session_state.question_counter += 1
 
     if st.session_state.due_index >= len(st.session_state.due_entries):
         # 测试结束
@@ -337,6 +355,21 @@ def advance_to_next():
         st.session_state.answer_submitted = False
         return
 
+    # ── 错题穿插检查 ──
+    interleaved = False
+    if st.session_state.question_counter >= st.session_state.INTERLEAVE_INTERVAL:
+        # 从数据库拉取弱项卡片（ef 最低的到期题目）
+        data = load_data()
+        current_kw = st.session_state.due_entries[st.session_state.due_index]["keyword"]
+        weak_cards = get_weak_cards(data, exclude_keyword=current_kw, limit=3)
+        if weak_cards:
+            card = random.choice(weak_cards)
+            st.session_state.due_entries.insert(st.session_state.due_index, card)
+            interleaved = True
+        # 无论是否找到错题，都重置计数器，开始新一轮计数
+        st.session_state.question_counter = 0
+
+    st.session_state._interleaved = interleaved
     st.session_state.current_entry = st.session_state.due_entries[st.session_state.due_index]
     st.session_state.current_question = None
     st.session_state.current_solution = None
@@ -404,18 +437,97 @@ def render_complete():
 
 
 # ============================================================
+#  历史视图
+# ============================================================
+
+def render_history():
+    """在独立 Tab 中展示题库全貌，支持按弱项 / 待复习筛选。"""
+    st.title("📋 题库浏览")
+
+    data = load_data()
+
+    if not data:
+        st.info("📭 题库为空。请先通过命令行 `python trigger.py` 录入题目。")
+        return
+
+    # ── 筛选按钮行 ──
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        if st.button("📚 全部题目", use_container_width=True):
+            st.session_state.history_filter = "all"
+    with col2:
+        if st.button("⚠️ 弱项 (ef < 2.0)", use_container_width=True):
+            st.session_state.history_filter = "weak"
+    with col3:
+        if st.button("⏰ 待复习", use_container_width=True):
+            st.session_state.history_filter = "due"
+
+    now = int(time.time())
+
+    filter_mode = st.session_state.history_filter
+    if filter_mode == "weak":
+        filtered = [e for e in data if e.get("ef", 2.5) < 2.0]
+    elif filter_mode == "due":
+        filtered = [e for e in data if e.get("next_review", now) <= now]
+    else:
+        filtered = data
+
+    st.caption(f"当前筛选：**{_filter_label(filter_mode)}**  ·  共 **{len(filtered)}** 条记录")
+
+    if not filtered:
+        st.success("🎉 没有符合条件的记录！")
+        return
+
+    # ── 构建 DataFrame ──
+    rows = []
+    for e in filtered:
+        nr = e.get("next_review", 0)
+        nr_str = datetime.fromtimestamp(nr).strftime("%Y-%m-%d %H:%M") if nr else "-"
+        rows.append({
+            "知识点": e.get("keyword", ""),
+            "解析（前80字）": _truncate(e.get("solution", ""), 80),
+            "下次复习": nr_str,
+            "间隔(天)": e.get("interval", 0),
+            "EF": round(e.get("ef", 2.5), 1),
+        })
+
+    df = pd.DataFrame(rows)
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+
+def _filter_label(mode: str) -> str:
+    """将筛选模式转为中文标签。"""
+    return {"all": "全部题目", "weak": "弱项 (ef < 2.0)", "due": "待复习"}.get(mode, mode)
+
+
+def _truncate(text: str, max_len: int) -> str:
+    """截断过长的文本，超出部分用 … 表示。"""
+    if not text:
+        return ""
+    if len(text) <= max_len:
+        return text
+    return text[:max_len] + "…"
+
+
+# ============================================================
 #  主入口
 # ============================================================
 
 def main():
     render_sidebar()
 
-    if not st.session_state.test_active:
-        render_idle()
-    elif st.session_state.current_entry is None:
-        render_complete()
-    else:
-        render_test()
+    tab1, tab2 = st.tabs(["🧠 训练", "📋 题库浏览"])
+
+    with tab1:
+        if not st.session_state.test_active:
+            render_idle()
+        elif st.session_state.current_entry is None:
+            render_complete()
+        else:
+            render_test()
+
+    with tab2:
+        render_history()
 
 
 if __name__ == "__main__":
