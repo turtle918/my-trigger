@@ -222,8 +222,13 @@ def generate_question(keyword: str) -> dict[str, Any]:
         msg = f"网络请求异常: {e}"
         print(f"\n  {msg}")
         return {"error": msg, "detail": str(e)}
-    except (json.JSONDecodeError, KeyError, IndexError) as e:
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError, AttributeError) as e:
         msg = f"API 返回内容解析失败: {e}"
+        print(f"\n  {msg}")
+        return {"error": msg, "detail": str(e)}
+    except Exception as e:
+        # 兜底：确保任何意外异常都返回字典，绝不泄露 None
+        msg = f"未知错误: {type(e).__name__}: {e}"
         print(f"\n  {msg}")
         return {"error": msg, "detail": str(e)}
 

@@ -203,6 +203,13 @@ def render_test():
     if st.session_state.current_question is None:
         with st.spinner("🤖 正在调用 DeepSeek API 生成变式题..."):
             result = generate_question(keyword)
+            # 安全检查：确保 result 是 dict 再使用 in 操作符
+            if not isinstance(result, dict):
+                st.error(f"❌ 生成题目失败 —— 函数返回了异常类型: {type(result).__name__}")
+                if st.button("⏭️ 跳过此题"):
+                    advance_to_next()
+                    st.rerun()
+                return
             if "error" in result:
                 # 显示详细错误信息，方便排查
                 st.error(f"❌ 生成题目失败 —— {result['error']}")
