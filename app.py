@@ -141,7 +141,6 @@ def render_sidebar():
 def render_idle():
     """显示空闲状态：可以开始新测试。"""
     st.title("🧠 解题条件反射训练器")
-    st.caption("SM-2 艾宾浩斯记忆算法 + DeepSeek API 动态出题")
 
     data = st.session_state.data
     due = count_due(data)
@@ -233,7 +232,7 @@ def render_test():
 
     # 生成题目按钮（如果还没生成）
     if st.session_state.current_question is None:
-        with st.spinner("🤖 正在调用 DeepSeek API 生成变式题..."):
+        with st.spinner("正在为您生成题目..."):
             result = generate_question(keyword)
             # 安全检查：确保 result 是 dict 再使用 in 操作符
             if not isinstance(result, dict):
