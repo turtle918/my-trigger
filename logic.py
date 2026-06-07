@@ -111,26 +111,62 @@ def load_data() -> list[dict]:
 
 
 def save_data(data: list[dict]) -> None:
-    """将全部题目全量写入 Supabase 云数据库。
+    """将全部题目全量写入 Supabase 云数据库（仅 CLI 批量操作使用）。
 
     先清空整个表，再逐批插入，实现完整的数据替换。
-    遵循"删旧插新"策略，保证本地数据与云端一致。
+    注意：此操作非事务性，仅限受控的 CLI 场景使用。
+    Web 端应使用 update_card() 做单条原子更新。
     """
     supabase = _get_supabase()
 
     # 1) 清空表（删除所有行）
-    #    Supabase 要求 DELETE 必须带过滤条件，这里用 id 不为空来匹配全部行
     supabase.table(TABLE_NAME).delete().neq("keyword", "__NO_SUCH_KEYWORD__").execute()
 
     # 2) 批量插入新数据
     if not data:
         return
 
-    # 每次最多插入 500 行（Supabase REST API 限制）
     batch_size = 500
     for i in range(0, len(data), batch_size):
         batch = data[i : i + batch_size]
-        supabase.table(TABLE_NAME).insert(batch).execute()
+        try:
+            supabase.table(TABLE_NAME).insert(batch).execute()
+        except Exception as e:
+            raise RuntimeError(
+                f"save_data 批量插入失败（批次 {i // batch_size + 1}，"
+                f"第 {i + 1}-{min(i + batch_size, len(data))} 条）: {e}"
+            ) from e
+
+
+def update_card(keyword: str, updates: dict) -> bool:
+    """原子更新单张卡片的 SM-2 复习数据。
+
+    直接对 Supabase 执行单行 UPDATE，不使用删旧插新策略，
+    因此不会影响其他卡片的数据完整性。
+
+    参数:
+        keyword: 知识点关键词（唯一标识）
+        updates: 要更新的字段字典，如 {"interval": 5, "ef": 2.6, "next_review": 1718000000}
+
+    返回:
+        True 表示更新成功，False 表示更新失败。
+    """
+    supabase = _get_supabase()
+    try:
+        result = (
+            supabase.table(TABLE_NAME)
+            .update(updates)
+            .eq("keyword", keyword)
+            .execute()
+        )
+        # 检查是否有行被更新
+        if result.data is None or len(result.data) == 0:
+            print(f"  ⚠ update_card: 未找到 keyword='{keyword}' 的记录，更新可能未生效")
+            return False
+        return True
+    except Exception as e:
+        print(f"  ❌ update_card 失败 (keyword='{keyword}'): {e}")
+        return False
 
 
 # ============================================================

@@ -11,7 +11,7 @@ import pandas as pd
 import streamlit as st
 from logic import (
     load_data,
-    save_data,
+    update_card,
     generate_question,
     sm2_update,
     extract_subject,
@@ -37,7 +37,14 @@ st.set_page_config(
 # ============================================================
 
 def init_session():
-    """初始化 session_state 中的变量。"""
+    """初始化 session_state 中的变量。
+
+    关键设计：
+    - UI 交互状态（test_active, show_solution 等）在每次新会话时重置为默认值。
+    - 题库数据（data）在每次新会话时从 Supabase 强制加载，确保进度不丢失。
+    - 已存在的 SM-2 进度（interval, ef, next_review）永远不会被此函数覆盖。
+    """
+    # ── UI 交互状态（仅影响当前会话的界面表现）──
     defaults = {
         "test_active": False,
         "current_entry": None,
@@ -63,6 +70,13 @@ def init_session():
         if key not in st.session_state:
             st.session_state[key] = value
 
+    # ── 题库数据（从 Supabase 加载，只在新会话时执行一次）──
+    # Streamlit 在浏览器关闭后重新打开时，session_state 会完全清空，
+    # 因此 "data" not in st.session_state 意味着这是一个全新会话，
+    # 必须从 Supabase 拉取最新进度。
+    if "data" not in st.session_state:
+        st.session_state.data = load_data()
+
 
 init_session()
 
@@ -76,7 +90,7 @@ def render_sidebar():
     with st.sidebar:
         st.title("📊 统计")
 
-        data = load_data()
+        data = st.session_state.data
         total = len(data)
         due = count_due(data)
 
@@ -107,6 +121,7 @@ def render_sidebar():
         # 操作按钮
         st.subheader("⚙️ 操作")
         if st.button("🔄 刷新数据", use_container_width=True):
+            st.session_state.data = load_data()
             st.rerun()
 
         if st.button("🛑 结束当前测试", use_container_width=True):
@@ -128,7 +143,7 @@ def render_idle():
     st.title("🧠 解题条件反射训练器")
     st.caption("SM-2 艾宾浩斯记忆算法 + DeepSeek API 动态出题")
 
-    data = load_data()
+    data = st.session_state.data
     due = count_due(data)
 
     if not data:
@@ -318,16 +333,37 @@ def render_test():
 # ============================================================
 
 def submit_answer(correct: bool):
-    """提交答案并更新 SM-2 数据。"""
+    """提交答案并更新 SM-2 数据。
+
+    使用原子单行更新（update_card）直接写入 Supabase，
+    避免 save_data() 的"删全表再全量插入"模式带来的数据丢失风险。
+    """
     entry = st.session_state.current_entry
     if entry:
+        # 1) 在内存中更新 SM-2 算法数据
         sm2_update(entry, correct)
-        data = load_data()
-        for i, e in enumerate(data):
+
+        # 2) 原子更新 Supabase 中的单条记录（不会影响其他卡片）
+        success = update_card(entry["keyword"], {
+            "interval": entry["interval"],
+            "ef": entry["ef"],
+            "next_review": entry["next_review"],
+        })
+
+        # 3) 同步更新本地缓存 st.session_state.data
+        for i, e in enumerate(st.session_state.data):
             if e["keyword"] == entry["keyword"]:
-                data[i] = entry
+                e["interval"] = entry["interval"]
+                e["ef"] = entry["ef"]
+                e["next_review"] = entry["next_review"]
                 break
-        save_data(data)
+
+        # 4) 如果云端更新失败，向用户展示警告
+        if not success:
+            st.warning(
+                "⚠️ 云端保存失败，但本地进度已更新。"
+                "请检查网络连接后点击「刷新数据」重新同步。"
+            )
 
         st.session_state.test_count += 1
         if correct:
@@ -358,8 +394,9 @@ def advance_to_next():
     # ── 错题穿插检查 ──
     interleaved = False
     if st.session_state.question_counter >= st.session_state.INTERLEAVE_INTERVAL:
-        # 从数据库拉取弱项卡片（ef 最低的到期题目）
-        data = load_data()
+        # 从本地缓存拉取弱项卡片（ef 最低的到期题目）
+        # 本地缓存已在 submit_answer() 中与 Supabase 保持同步
+        data = st.session_state.data
         current_kw = st.session_state.due_entries[st.session_state.due_index]["keyword"]
         weak_cards = get_weak_cards(data, exclude_keyword=current_kw, limit=3)
         if weak_cards:
@@ -444,7 +481,7 @@ def render_history():
     """在独立 Tab 中展示题库全貌，支持按弱项 / 待复习筛选。"""
     st.title("📋 题库浏览")
 
-    data = load_data()
+    data = st.session_state.data
 
     if not data:
         st.info("📭 题库为空。请先通过命令行 `python trigger.py` 录入题目。")
